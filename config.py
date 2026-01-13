@@ -1,0 +1,3 @@
+ADDRESS = '0.0.0.0'
+PORT = 7778
+MAX_CONNS = 32
