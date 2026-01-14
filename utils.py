@@ -1,19 +1,35 @@
 import socket
+import struct
 from colorama import Fore, Style
 
-def is_conn_open(conn: socket.socket) -> bool:
-    try:
-        return len(conn.recv(1, socket.MSG_DONTWAIT | socket.MSG_PEEK)) == 1
-    except BlockingIOError:
-        return True
+def send_msg(conn, data):
+    length = len(data)
+    conn.sendall(struct.pack("!I", length) + data)
 
-# Logging
+def recv_msg(conn):
+    raw_len = _recv_exact(conn, 4)
+    if not raw_len:
+        return None
+    length = struct.unpack("!I", raw_len)[0]
+    return _recv_exact(conn, length)
 
-def debug(message: str) -> None:
-    print(Style.DIM + Fore.WHITE + message + Style.RESET_ALL)
+def _recv_exact(conn, n):
+    data = b""
+    while len(data) < n:
+        packet = conn.recv(n - len(data))
+        if not packet:
+            return None
+        data += packet
+    return data
 
-def warn(message: str) -> None:
-    print(Fore.YELLOW + message + Fore.RESET)
+def debug(msg):
+    print(f"{Style.DIM}{Fore.WHITE}[DEBUG] {msg}{Style.RESET_ALL}")
 
-def error(message: str) -> None:
-    print(Fore.RED + message + Fore.RESET)
+def warn(msg):
+    print(f"{Fore.YELLOW}[AVISO] {msg}{Style.RESET_ALL}")
+
+def error(msg):
+    print(f"{Fore.RED}[ERRO] {msg}{Style.RESET_ALL}")
+
+def success(msg):
+    print(f"{Fore.GREEN}[OK] {msg}{Style.RESET_ALL}")
