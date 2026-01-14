@@ -1,9 +1,8 @@
-from config import ADDRESS, PORT, MAX_CONNS
-from utils import is_conn_open, debug, warn
+from config import ADDRESS, PORT, MAX_MSG_LEN, MAX_CONNS
+from utils import is_conn_open, debug, warn, error
 
 import socket
 from threading import Thread
-from colorama import Fore, Style
 
 
 CONNS = {}
@@ -12,7 +11,7 @@ def handle_conn(conn: socket.socket) -> None:
     key = str(conn.getpeername())
 
     while is_conn_open(conn):
-        data = conn.recv(8_192)
+        data = conn.recv(MAX_MSG_LEN)
         if len(data) == 0:
             continue
 
@@ -30,11 +29,14 @@ if __name__ == '__main__':
 
     try:
         while True:
-            conn, raddr = server.accept()
-            print(f'Connection from {raddr}')
-            CONNS[str(conn.getpeername())] = conn
+            conn, _ = server.accept()
+            key = str(conn.getpeername())
+            debug(f'Connection with {key} established.')
+            CONNS[key] = conn
             Thread(target=handle_conn, args=(conn,), daemon=True).start()
     except KeyboardInterrupt:
         warn('\rReceived Ctrl+C')
+    except Exception as err:
+        error(f'{err}')
     finally:
         server.close()
