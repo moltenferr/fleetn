@@ -1,7 +1,8 @@
 import socket
 import threading
+from time import time, sleep
 from threading import Thread, Lock
-from config import ADDRESS, PORT, MAX_CONNS
+from config import ADDRESS, PORT, MAX_CONNS, KEY_ROT_THRESHOLD, MAGIC_ROT
 from utils import send_msg, recv_msg, debug, warn, error, success
 
 from Crypto.PublicKey import ECC, RSA
@@ -54,7 +55,8 @@ def perform_handshake(conn):
         "k_c2s": HKDF(prk, 16, b"c2s", SHA256),
         "k_s2c": HKDF(prk, 16, b"s2c", SHA256),
         "s_recv": 0,
-        "s_send": 1
+        "s_send": 1,
+        'msgs_until_rot': KEY_ROT_THRESHOLD
     }
 
 def handle_conn(conn):
@@ -69,7 +71,26 @@ def handle_conn(conn):
         success(f"Cliente {cid.hex()[:8]} autenticado.")
 
         while True:
+            # Rotate keys
+            with SESSIONS_LOCK:
+                if session['msgs_until_rot'] <= 0:
+                    pk_s = ECC.generate(curve='P-256')
+                    salt = get_random_bytes(16)
+
+                    send_msg(conn, MAGIC_ROT + pk_s.public_key().export_key(format='DER') + salt)
+                    data = recv_msg(conn)
+                    
+                    if data and data[:2] == MAGIC_ROT:
+                        pk_c = ECC.import_key(data[2:]).public_key()
+                        z = int((pk_s.d * pk_c.pointQ).x).to_bytes(32, 'big')
+                        prk = HKDF(z, 32, salt, SHA256)
+                        session['k_c2s'] = HKDF(prk, 16, b'c2s', SHA256)
+                        session['k_s2c'] = HKDF(prk, 16, b's2c', SHA256)
+                        session['msgs_until_rot'] = KEY_ROT_THRESHOLD
+                        debug(f'Keys for {cid.hex()[:8]} rotated')
+            
             frame = recv_msg(conn)
+            
             if not frame or len(frame) < 52: break
 
             nonce, snd, rcp, seq = frame[:12], frame[12:28], frame[28:44], frame[44:52]
@@ -80,6 +101,7 @@ def handle_conn(conn):
             if snd != cid or val_seq < session["s_recv"]:
                 continue
             session["s_recv"] = val_seq + 1
+            session['msgs_until_rot'] -= 1
 
             # Decriptação
             cipher = AES.new(session["k_c2s"], AES.MODE_GCM, nonce=nonce)
@@ -122,7 +144,6 @@ if __name__ == '__main__':
         s.bind((ADDRESS, PORT))
         s.listen(MAX_CONNS)
         success(f"Servidor ativo em {ADDRESS}:{PORT}")
-        
         while True:
             try:
                 c, addr = s.accept()
