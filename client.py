@@ -12,13 +12,17 @@ from Crypto.Signature import pkcs1_15
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 
-MY_ID = get_random_bytes(16)
+MY_ID: bytes = get_random_bytes(16)
+TARGET_ID: bytes = None
+TARGET_ID_FROM_REMOTE = False
+
 SERVER_PK: RSA.RsaKey = None
+
 K_C2S: ECC.EccKey = None
 K_S2C: ECC.EccKey = None
 
 def listen_server(conn):
-    global SERVER_PK, K_C2S, K_S2C
+    global TARGET_ID, TARGET_ID_FROM_REMOTE, SERVER_PK, K_C2S, K_S2C
     last_s = 0
     while True:
         try:
@@ -48,7 +52,11 @@ def listen_server(conn):
             payload = data[52:]
             msg = cipher.decrypt_and_verify(payload[:-16], payload[-16:])
             
-            print(f"\n[{snd.hex()[:8]}]: {msg.decode()}")
+            if not TARGET_ID:
+                print(f"\rConversando com {snd.hex()[:8]}")
+                TARGET_ID = snd
+                TARGET_ID_FROM_REMOTE = True
+            print(f'\n[{snd.hex()[:8]}] {msg.decode()}')
             print(f"Mensagem: ", end="", flush=True)
         except:
             break
@@ -96,22 +104,35 @@ if __name__ == '__main__':
 
         threading.Thread(target=listen_server, args=(c,), daemon=True).start()
 
-        target_hex = input("Destinatário (ID Hex): ").strip()
-        target_id = bytes.fromhex(target_hex)
+        target_hex = None
+        while not TARGET_ID:
+            target_hex = input("Destinatário (ID Hex): ").strip()
+            try:
+                TARGET_ID = bytes.fromhex(target_hex)
+            except ValueError as e:
+                if not TARGET_ID:
+                    error(f'{e}')
+                continue
+            except Exception as e:
+                raise e
         
         s_count = 1
         while True:
-            txt = input("Mensagem: ")
+            if TARGET_ID_FROM_REMOTE and target_hex:
+                txt = target_hex
+                target_hex = None
+            else:
+                txt = input("Mensagem: ")
             if not txt: continue
             
             n = get_random_bytes(12)
             seq_b = s_count.to_bytes(8, 'big')
             
             cipher = AES.new(K_C2S, AES.MODE_GCM, nonce=n)
-            cipher.update(MY_ID + target_id + seq_b)
+            cipher.update(MY_ID + TARGET_ID + seq_b)
             
             ct, tag = cipher.encrypt_and_digest(txt.encode())
-            send_msg(c, n + MY_ID + target_id + seq_b + ct + tag)
+            send_msg(c, n + MY_ID + TARGET_ID + seq_b + ct + tag)
             s_count += 1
 
     except KeyboardInterrupt:
