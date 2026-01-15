@@ -1,9 +1,9 @@
 import socket
-import threading
-from time import time, sleep
 from threading import Thread, Lock
+
 from config import ADDRESS, PORT, MAX_CONNS, KEY_ROT_THRESHOLD, MAGIC_ROT
-from utils import send_msg, recv_msg, debug, warn, error, success
+from utils import send_msg, recv_msg
+from utils import success, debug, warn, error, die, ex_info
 
 from Crypto.PublicKey import ECC, RSA
 from Crypto.Protocol.KDF import HKDF
@@ -21,12 +21,12 @@ try:
     with open("server.crt", "rb") as f:
         SERVER_CERT = f.read()
 except Exception as e:
-    print(f"Erro ao carregar chaves: {e}")
-    exit(1)
+    die(f'[{ex_info()}] Erro ao carregar chave/certificado: {e}')
 
 def perform_handshake(conn):
     data = recv_msg(conn)
-    if not data: return None, None
+    if not data:
+        return None, None
     
     cid = data[:16]
     pk_c = ECC.import_key(data[16:])
@@ -59,16 +59,20 @@ def perform_handshake(conn):
         'msgs_until_rot': KEY_ROT_THRESHOLD
     }
 
-def handle_conn(conn):
+def handle_conn(conn: socket.socket):
     cid = None
     try:
         cid, session = perform_handshake(conn)
-        if not cid: return
+        if not cid:
+            addr, port = conn.getpeername()
+            warn(f'Handshake inválido de {addr}:{port}')
+            conn.close()
+            return
 
         with SESSIONS_LOCK:
             SESSIONS[cid] = session
         
-        success(f"Cliente {cid.hex()[:8]} autenticado.")
+        success(f'Cliente {cid.hex()[:8]} autenticado.')
 
         while True:
             # Rotate keys
@@ -87,71 +91,82 @@ def handle_conn(conn):
                         session['k_c2s'] = HKDF(prk, 16, b'c2s', SHA256)
                         session['k_s2c'] = HKDF(prk, 16, b's2c', SHA256)
                         session['msgs_until_rot'] = KEY_ROT_THRESHOLD
-                        debug(f'Keys for {cid.hex()[:8]} rotated')
+                        debug(f'Chaves com {cid.hex()[:8]} rotacionadas.')
+                    else:
+                        warn(f'Falha rotacionando chaves de {cid.hex()[:8]}; encerrando conexão.')
+                        conn.close()
+                        return
             
             frame = recv_msg(conn)
             
-            if not frame or len(frame) < 52: break
+            if not frame or len(frame) < 52:
+                break
 
-            nonce, snd, rcp, seq = frame[:12], frame[12:28], frame[28:44], frame[44:52]
-            val_seq = int.from_bytes(seq, 'big')
+            nonce, sender, recipient, seq_no = frame[:12], frame[12:28], frame[28:44], frame[44:52]
+            val_seq_no = int.from_bytes(seq_no, 'big')
             ciphertext_tag = frame[52:]
 
-            # Validar remetente e replay
-            if snd != cid or val_seq < session["s_recv"]:
+            # Check for valid recipient and anti-replay
+            if sender != cid or val_seq_no < session['s_recv']:
                 continue
-            session["s_recv"] = val_seq + 1
-            session['msgs_until_rot'] -= 1
 
-            # Decriptação
-            cipher = AES.new(session["k_c2s"], AES.MODE_GCM, nonce=nonce)
-            cipher.update(snd + rcp + seq)
+            with SESSIONS_LOCK:
+                session['s_recv'] = val_seq_no + 1
+                session['msgs_until_rot'] -= 1
+
+            # Decryption
+            with SESSIONS_LOCK:
+                cipher = AES.new(session['k_c2s'], AES.MODE_GCM, nonce=nonce)
+            cipher.update(sender + recipient + seq_no)
             
             try:
                 msg = cipher.decrypt_and_verify(ciphertext_tag[:-16], ciphertext_tag[-16:])
-                debug(f"De {snd.hex()[:6]} para {rcp.hex()[:6]}: {msg.decode()}")
-            except:
-                error("Falha de integridade detectada.")
-                continue
+                debug(f'De {sender.hex()[:6]} para {recipient.hex()[:6]}: {msg.decode()}')
+            except Exception as _:
+                warn(f'Falha de autenticidade/integridade detectada. ({sender.hex()[:6]} -> {recipient.hex()[:6]})')
+                continue 
 
-            # Roteamento
+            # Forwarding
             with SESSIONS_LOCK:
-                target = SESSIONS.get(rcp)
+                target = SESSIONS.get(recipient)
                 if target:
-                    n_out = get_random_bytes(12)
-                    s_out = target["s_send"].to_bytes(8, 'big')
+                    nonce_out = get_random_bytes(12)
+                    seq_out = target['s_send'].to_bytes(8, 'big')
                     
-                    c_out = AES.new(target["k_s2c"], AES.MODE_GCM, nonce=n_out)
-                    c_out.update(snd + rcp + s_out)
-                    ct, tag = c_out.encrypt_and_digest(msg)
+                    cipher_out = AES.new(target['k_s2c'], AES.MODE_GCM, nonce=nonce_out)
+                    cipher_out.update(sender + recipient + seq_out)
+                    ct, tag = cipher_out.encrypt_and_digest(msg)
                     
-                    send_msg(target["conn"], n_out + snd + rcp + s_out + ct + tag)
-                    target["s_send"] += 1
+                    send_msg(target['conn'], nonce_out + sender + recipient + seq_out + ct + tag)
+                    target['s_send'] += 1
+                else:
+                    warn(f'CID não encontrado: {recipient.hex()[:6]}')
 
     except Exception as e:
-        error(f"Erro na conexao: {e}")
+        error(f'[{ex_info()}] Erro na conexão: {e}')
     finally:
         conn.close()
         if cid:
-            with SESSIONS_LOCK: SESSIONS.pop(cid, None)
-            warn(f"Cliente {cid.hex()[:8]} desconectado.")
+            with SESSIONS_LOCK:
+                SESSIONS.pop(cid, None)
+            warn(f'Cliente {cid.hex()[:6]} desconectado.')
 
 if __name__ == '__main__':
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     
     try:
-        s.bind((ADDRESS, PORT))
-        s.listen(MAX_CONNS)
-        success(f"Servidor ativo em {ADDRESS}:{PORT}")
+        server.bind((ADDRESS, PORT))
+        server.listen(MAX_CONNS)
+        success(f'Servidor ativo em {ADDRESS}:{PORT}')
+        
         while True:
-            try:
-                c, addr = s.accept()
-                Thread(target=handle_conn, args=(c,), daemon=True).start()
-            except socket.error:
-                break 
+            conn, _addr = server.accept()
+            Thread(target=handle_conn, args=(conn,), daemon=True).start()
                 
     except KeyboardInterrupt:
-        warn('\rEncerrando servidor...')
+        warn('\rEncerrando servidor ...')
+    except Exception as e:
+        error(f'[{ex_info()}] {e}')
     finally:
-        s.close()
+        server.close()

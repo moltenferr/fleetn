@@ -1,9 +1,10 @@
 import socket
 import threading
-import sys
 import os
+
 from config import ADDRESS, PORT, MAGIC_ROT
-from utils import send_msg, recv_msg, debug, warn, error, success
+from utils import send_msg, recv_msg
+from utils import success, warn, error, ex_info
 
 from Crypto.PublicKey import ECC, RSA
 from Crypto.Protocol.KDF import HKDF
@@ -58,8 +59,8 @@ def listen_server(conn):
                 TARGET_ID_FROM_REMOTE = True
             print(f'\n[{snd.hex()[:8]}] {msg.decode()}')
             print(f"Mensagem: ", end="", flush=True)
-        except:
-            break
+        except Exception as e:
+            raise e
     os._exit(0)
 
 def start_handshake(c):
@@ -136,8 +137,8 @@ if __name__ == '__main__':
             s_count += 1
 
     except KeyboardInterrupt:
-        print("\nSaindo...")
+        warn('\nSaindo ...')
     except Exception as e:
-        error(f"Falha: {e}")
+        error(f'[{ex_info()}] Falha: {e}')
     finally:
         c.close()
