@@ -34,8 +34,9 @@ class Security:
             ecc_srv = ECC.generate(curve="P-256")
             pk_s_bytes = ecc_srv.public_key().export_key(format="DER")
             salt = get_random_bytes(16)
+            sig = pkcs1_15.new(SERVER_RSA_KEY).sign(SHA256.new(pk_s_bytes + salt))
 
-            send_msg(conn, MAGIC_ROT + pk_s_bytes + salt)
+            send_msg(conn, MAGIC_ROT + pk_s_bytes + salt + sig)
 
             data = recv_msg(conn)
             if not data or not data.startswith(MAGIC_ROT):

@@ -32,7 +32,14 @@ def listen_server(conn):
 
             # Rotate keys
             if data[:2] == MAGIC_ROT:
-                pk_s, salt = ECC.import_key(data[2:-16]).public_key(), data[-16:]
+                data = data[2:]
+                pk_s, salt, sig = ECC.import_key(data[:91]).public_key(), data[91:91+16], data[107:]
+                
+                try:
+                    pkcs1_15.new(SERVER_PK).verify(SHA256.new(pk_s.export_key(format='DER') + salt), sig)
+                except Exception as e:
+                    error(f'Falha na rotação de chaves (verificação do servidor): {e}')
+                    continue
                 pk_c = ECC.generate(curve='P-256')
                 send_msg(conn, MAGIC_ROT + pk_c.public_key().export_key(format='DER'))
                 z = int((pk_c.d * pk_s.pointQ).x).to_bytes(32, 'big')
